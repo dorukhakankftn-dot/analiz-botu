@@ -1,4 +1,4 @@
-"""Sinyal takip sistemi - Giriş bekle, aktif et, TP/SL kontrol et."""
+"""Sinyal takip sistemi - Giriş bekle, aktif et, TP/SL kontrol et + Supabase."""
 
 import logging
 import time
@@ -9,6 +9,7 @@ import httpx
 from models import Signal
 from config import MEXC_BASE, TELEGRAM_BOT_TOKEN
 from mistral_ai import MistralAI
+import supabase_db as db
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class SignalTracker:
 
     def add_signal(self, chat_id: int, symbol: str, direction: str, entry: float,
                    tp: float, sl: float, level_code: str, signal_type: str,
-                   tp_long: float = 0.0, analysis: str = "") -> dict:
+                   tp_long: float = 0.0, analysis: str = "", rr_ratio: float = 0.0) -> dict:
         """Yeni sinyal ekle."""
         signal = {
             "chat_id": chat_id,
@@ -57,12 +58,20 @@ class SignalTracker:
             "signal_type": signal_type,
             "status": "BEKLEMEDE",
             "analysis": analysis,
+            "rr_ratio": rr_ratio,
             "created_at": time.time(),
             "activated_at": None,
             "closed_at": None,
         }
         self.signals.append(signal)
         self._save_signals()
+
+        # Supabase'e kaydet
+        try:
+            db.save_signal(signal)
+        except Exception as e:
+            logger.error(f"Supabase sinyal kaydetme hatası: {e}")
+
         return signal
 
     def get_active_signals(self, chat_id: int = None) -> list[dict]:
@@ -116,9 +125,11 @@ class SignalTracker:
                             signal["chat_id"],
                             f"🟢 <b>SİNYAL AKTİF!</b>\n"
                             f"📊 {signal['symbol']}\n"
-                            f"📈 {signal['direction']} @ {price}\n"
-                            f"🎯 TP: {signal['tp']}\n"
-                            f"🛑 SL: {signal['sl']}"
+                            f"📈 LONG @ {price:.6g}\n"
+                            f"🎯 TP1: {signal['tp']:.6g}\n"
+                            f"🎯 TP2: {signal.get('tp_long', 0):.6g}\n"
+                            f"🛑 SL: {signal['sl']:.6g}\n"
+                            f"📐 R/R: 1:{signal.get('rr_ratio', 0)}"
                         )
                 else:  # SELL
                     if price >= signal["entry"]:
@@ -129,9 +140,11 @@ class SignalTracker:
                             signal["chat_id"],
                             f"🔴 <b>SİNYAL AKTİF!</b>\n"
                             f"📊 {signal['symbol']}\n"
-                            f"📉 {signal['direction']} @ {price}\n"
-                            f"🎯 TP: {signal['tp']}\n"
-                            f"🛑 SL: {signal['sl']}"
+                            f"📉 SHORT @ {price:.6g}\n"
+                            f"🎯 TP1: {signal['tp']:.6g}\n"
+                            f"🎯 TP2: {signal.get('tp_long', 0):.6g}\n"
+                            f"🛑 SL: {signal['sl']:.6g}\n"
+                            f"📐 R/R: 1:{signal.get('rr_ratio', 0)}"
                         )
 
             # AKTIF -> TP veya SL'e geldi mi?
@@ -140,18 +153,30 @@ class SignalTracker:
                     if price >= signal["tp"]:
                         signal["status"] = "TP"
                         signal["closed_at"] = time.time()
+                        signal["close_price"] = price
                         changed = True
+                        profit_pct = (price - signal['entry']) / signal['entry'] * 100
                         self._send_notification(
                             signal["chat_id"],
                             f"✅ <b>HEDEF GELDİ!</b> 🎉\n"
                             f"📊 {signal['symbol']}\n"
-                            f"📈 BUY @ {signal['entry']} → {price}\n"
-                            f"💰 Kar: %{((price - signal['entry']) / signal['entry'] * 100):.2f}"
+                            f"📈 LONG @ {signal['entry']:.6g} → TP @ {price:.6g}\n"
+                            f"💰 Kar: %{profit_pct:.2f}\n"
+                            f"📐 R/R: 1:{signal.get('rr_ratio', 0)}"
                         )
+                        # Supabase'e başarı kaydet
+                        try:
+                            db.save_ai_note("win", f"{signal['symbol']} LONG TP geldi. Kar: %{profit_pct:.2f}. Seviye: {signal['level_code']}", signal['symbol'])
+                        except:
+                            pass
+
                     elif price <= signal["sl"]:
                         signal["status"] = "SL"
                         signal["closed_at"] = time.time()
+                        signal["close_price"] = price
                         changed = True
+                        loss_pct = (signal['entry'] - price) / signal['entry'] * 100
+
                         # AI hata analizi
                         error_analysis = self.ai.analyze_error(
                             json.dumps(signal, default=str),
@@ -161,27 +186,48 @@ class SignalTracker:
                             signal["chat_id"],
                             f"🛑 <b>STOP LOSS!</b>\n"
                             f"📊 {signal['symbol']}\n"
-                            f"📈 BUY @ {signal['entry']} → SL @ {price}\n"
-                            f"💸 Zarar: %{((signal['entry'] - price) / signal['entry'] * 100):.2f}\n\n"
+                            f"📈 LONG @ {signal['entry']:.6g} → SL @ {price:.6g}\n"
+                            f"💸 Zarar: %{loss_pct:.2f}\n\n"
                             f"🤖 <b>AI Hata Analizi:</b>\n{error_analysis[:500]}"
                         )
+                        # Supabase'e hata dersi kaydet
+                        try:
+                            db.save_ai_note(
+                                "error_lesson",
+                                f"STOP: {signal['symbol']} LONG. Zarar: %{loss_pct:.2f}. Seviye: {signal['level_code']}. AI Analiz: {error_analysis[:300]}",
+                                signal['symbol'],
+                                {"entry": signal['entry'], "sl": signal['sl'], "loss_pct": loss_pct}
+                            )
+                        except:
+                            pass
 
                 else:  # SELL
                     if price <= signal["tp"]:
                         signal["status"] = "TP"
                         signal["closed_at"] = time.time()
+                        signal["close_price"] = price
                         changed = True
+                        profit_pct = (signal['entry'] - price) / signal['entry'] * 100
                         self._send_notification(
                             signal["chat_id"],
                             f"✅ <b>HEDEF GELDİ!</b> 🎉\n"
                             f"📊 {signal['symbol']}\n"
-                            f"📉 SELL @ {signal['entry']} → {price}\n"
-                            f"💰 Kar: %{((signal['entry'] - price) / signal['entry'] * 100):.2f}"
+                            f"📉 SHORT @ {signal['entry']:.6g} → TP @ {price:.6g}\n"
+                            f"💰 Kar: %{profit_pct:.2f}\n"
+                            f"📐 R/R: 1:{signal.get('rr_ratio', 0)}"
                         )
+                        try:
+                            db.save_ai_note("win", f"{signal['symbol']} SHORT TP geldi. Kar: %{profit_pct:.2f}. Seviye: {signal['level_code']}", signal['symbol'])
+                        except:
+                            pass
+
                     elif price >= signal["sl"]:
                         signal["status"] = "SL"
                         signal["closed_at"] = time.time()
+                        signal["close_price"] = price
                         changed = True
+                        loss_pct = (price - signal['entry']) / signal['entry'] * 100
+
                         error_analysis = self.ai.analyze_error(
                             json.dumps(signal, default=str),
                             f"STOP LOSS - Fiyat {price}'a çıktı"
@@ -190,10 +236,19 @@ class SignalTracker:
                             signal["chat_id"],
                             f"🛑 <b>STOP LOSS!</b>\n"
                             f"📊 {signal['symbol']}\n"
-                            f"📉 SELL @ {signal['entry']} → SL @ {price}\n"
-                            f"💸 Zarar: %{((price - signal['entry']) / signal['entry'] * 100):.2f}\n\n"
+                            f"📉 SHORT @ {signal['entry']:.6g} → SL @ {price:.6g}\n"
+                            f"💸 Zarar: %{loss_pct:.2f}\n\n"
                             f"🤖 <b>AI Hata Analizi:</b>\n{error_analysis[:500]}"
                         )
+                        try:
+                            db.save_ai_note(
+                                "error_lesson",
+                                f"STOP: {signal['symbol']} SHORT. Zarar: %{loss_pct:.2f}. Seviye: {signal['level_code']}. AI Analiz: {error_analysis[:300]}",
+                                signal['symbol'],
+                                {"entry": signal['entry'], "sl": signal['sl'], "loss_pct": loss_pct}
+                            )
+                        except:
+                            pass
 
         if changed:
             self._save_signals()
