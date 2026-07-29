@@ -30,8 +30,10 @@ KURALLAR:
 - Bir seviyeye fiyat yaklaştığında o seviye aktif olur
 - BUY sinyali: Fiyat bir seviyenin üstüne çıktığında (low <= seviye <= close)
 - SELL sinyali: Fiyat bir seviyenin altına indiğinde (close <= seviye <= high)
-- TP: Bir sonraki üst/alt seviye
-- SL: Giriş seviyesinin %1.5 altı/üstü
+- TP: 2. veya 3. üst/alt seviye (geniş hedef, kısa mesafe değil)
+- SL: Giriş seviyesinin hemen altındaki/üstündeki en yakın seviyenin %0.2 arkası (dar stop)
+- Minimum R/R oranı: 1:2 (risk küçük, ödül büyük)
+- TP2 (uzun vadeli): 3. veya 4. seviye
 
 ZAMAN DİLİMİ ANALİZİ:
 - Scalp: 1m, 5m, 15m, 30m, 1h (biraz 4h) - Kısa vadeli, dakikalar-saatler
@@ -115,7 +117,20 @@ class MistralAI:
             return f"AI bağlantı hatası: {e}"
 
     def analyze_chart(self, symbol: str, candles_summary: str, structures_summary: str, mode: str = "analiz") -> str:
-        """Grafik analizi yap."""
+        """Grafik analizi yap - önceki hatalardan öğren."""
+        # Supabase'den öğrenilen dersleri al
+        lessons_text = ""
+        try:
+            import supabase_db as db
+            lessons = db.get_error_lessons(symbol=symbol, limit=5)
+            if not lessons:
+                lessons = db.get_error_lessons(limit=3)
+            if lessons:
+                lessons_text = "\n\nÖNCELİ HATALARIMIZ (Öğrenilen dersler - BUNLARI TEKRARLAMA):\n"
+                for l in lessons:
+                    lessons_text += f"- {l.get('content', '')[:200]}\n"
+        except:
+            pass
         if mode == "scalp":
             focus = "SCALP odaklı analiz yap. 1m-5m-15m-30m-1h grafiklere odaklan. Nokta atışı giriş, kısa vadeli hedef ve dar stop ver."
         elif mode == "swing":
@@ -144,6 +159,7 @@ LÜTFEN ŞU FORMATTA YANIT VER:
 7. Risk/Ödül oranı
 8. Güven seviyesi (%0-100)
 9. Ek notlar ve uyarılar
+{lessons_text}
 """
         return self.chat(STRATEGY_KNOWLEDGE, user_msg)
 
