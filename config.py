@@ -16,10 +16,19 @@ MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 # === MEXC Futures API ===
 MEXC_BASE = "https://contract.mexc.com/api/v1/contract"
 
+# === Supabase ===
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://lasopnelllyvxmtywhtu.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "sb_publishable_Ocpga-v9z4qDiOqLxKClzw_YE4TiE4M")
+
 # === Strateji Ayarları ===
-SL_PERCENT = 1.5  # Stop loss yüzdesi
+# SL artık sabit yüzde değil, en yakın seviyeye göre belirleniyor
+# Fallback SL (seviye bulunamazsa)
+SL_FALLBACK_PERCENT = 0.8  # Maksimum %0.8 stop
 NEW_COIN_MAX_DAYS = 30  # Yeni coin süresi (gün)
 NEW_COIN_DRAW_DAYS = 45  # Günlük çizim süresi (1.5 ay)
+
+# === Risk/Reward minimum oranı ===
+MIN_RR_RATIO = 2.0  # Minimum 1:2 risk/reward
 
 # === Zaman Dilimleri ===
 TF_LA_BASE = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
