@@ -13,6 +13,7 @@ from mistral_ai import MistralAI
 from analyzer import run_analysis
 from signal_tracker import SignalTracker
 from mexc_api import search_symbol, validate_symbol
+import supabase_db as db
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -87,6 +88,7 @@ Komutlar:
 /scalp [parite] - Scalp sinyal (1m-1h)
 /swing [parite] - Swing sinyal (30m-1W)
 /sinyaller - Aktif sinyalleri göster
+/istatistik - Win rate, kar/zarar istatistikleri
 /hata_tara - Bot sağlık kontrolü
 /protrader_ai - AI sohbet başlat
 /stop_chat - AI sohbet bitir
@@ -154,9 +156,10 @@ def handle_analiz(chat_id: int, args: str):
         sig = result["signal"]
         tracker.add_signal(
             chat_id, symbol, sig["direction"], sig["entry"],
-            sig["tp"], sig["sl"], sig["level_code"], "analiz"
+            sig["tp"], sig["sl"], sig["level_code"], "analiz",
+            tp_long=sig.get("tp_long", 0), rr_ratio=sig.get("rr_ratio", 0)
         )
-        send_message(chat_id, "✅ Sinyal takibe alındı! Giriş fiyatına geldiğinde bildirim alacaksın.")
+        send_message(chat_id, f"✅ Sinyal takibe alındı!\n📐 R/R: 1:{sig.get('rr_ratio', 0)}\nGiriş fiyatına geldiğinde bildirim alacaksın.")
 
 
 def handle_scalp(chat_id: int, args: str):
@@ -180,9 +183,10 @@ def handle_scalp(chat_id: int, args: str):
         sig = result["signal"]
         tracker.add_signal(
             chat_id, symbol, sig["direction"], sig["entry"],
-            sig["tp"], sig["sl"], sig["level_code"], "scalp"
+            sig["tp"], sig["sl"], sig["level_code"], "scalp",
+            tp_long=sig.get("tp_long", 0), rr_ratio=sig.get("rr_ratio", 0)
         )
-        send_message(chat_id, "✅ Scalp sinyali takibe alındı! Giriş fiyatına geldiğinde bildirim alacaksın.")
+        send_message(chat_id, f"✅ Scalp sinyali takibe alındı!\n📐 R/R: 1:{sig.get('rr_ratio', 0)}\nGiriş fiyatına geldiğinde bildirim alacaksın.")
 
 
 def handle_swing(chat_id: int, args: str):
@@ -206,9 +210,10 @@ def handle_swing(chat_id: int, args: str):
         sig = result["signal"]
         tracker.add_signal(
             chat_id, symbol, sig["direction"], sig["entry"],
-            sig["tp"], sig["sl"], sig["level_code"], "swing"
+            sig["tp"], sig["sl"], sig["level_code"], "swing",
+            tp_long=sig.get("tp_long", 0), rr_ratio=sig.get("rr_ratio", 0)
         )
-        send_message(chat_id, "✅ Swing sinyali takibe alındı! Giriş fiyatına geldiğinde bildirim alacaksın.")
+        send_message(chat_id, f"✅ Swing sinyali takibe alındı!\n📐 R/R: 1:{sig.get('rr_ratio', 0)}\nGiriş fiyatına geldiğinde bildirim alacaksın.")
 
 
 def handle_sinyaller(chat_id: int):
@@ -225,6 +230,28 @@ def handle_sinyaller(chat_id: int):
             f"   Giriş: {s['entry']:.6g} | TP: {s['tp']:.6g} | SL: {s['sl']:.6g}\n"
             f"   Seviye: {s['level_code']} | Durum: {s['status']}\n"
         )
+    send_message(chat_id, text)
+
+
+def handle_istatistik(chat_id: int):
+    """Sinyal istatistiklerini göster."""
+    stats = db.get_signal_stats(str(chat_id))
+    lessons = db.get_error_lessons(limit=5)
+
+    text = "📊 SİNYAL İSTATİSTİKLERİ\n" + "="*30 + "\n\n"
+    text += f"Toplam Sinyal: {stats['total']}\n"
+    text += f"✅ TP (Başarılı): {stats['tp']}\n"
+    text += f"🛑 SL (Stop): {stats['sl']}\n"
+    text += f"⏳ Aktif: {stats['active']}\n"
+    text += f"📈 Win Rate: %{stats['win_rate']}\n"
+    text += f"💰 Ort. Kar: %{stats['avg_profit']}\n"
+    text += f"💸 Ort. Zarar: %{stats['avg_loss']}\n"
+
+    if lessons:
+        text += "\n\n🧠 SON ÖĞRENLEN DERSLER:\n" + "-"*25 + "\n"
+        for lesson in lessons[:3]:
+            text += f"\n• {lesson.get('content', '')[:150]}\n"
+
     send_message(chat_id, text)
 
 
@@ -343,6 +370,8 @@ def handle_update(update: dict):
         handle_swing(chat_id, args)
     elif text == "/sinyaller":
         handle_sinyaller(chat_id)
+    elif text == "/istatistik":
+        handle_istatistik(chat_id)
     elif text == "/hata_tara":
         handle_hata_tara(chat_id)
     elif text == "/protrader_ai":
