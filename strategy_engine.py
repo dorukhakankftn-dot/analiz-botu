@@ -4,7 +4,7 @@ NOT: Strateji seviyeleri jenerik kodlarla anilir (L1, L2, L3, L4, L5,
 LA, LF, LG, LSU, LSD, LN). Bu isimlendirme bilinctir, degistirilmemelidir.
 """
 
-from config import TF_LA_BASE, TF_RAY_LEVELS, TF_SR, TF_L3, SL_PERCENT
+from config import TF_LA_BASE, TF_RAY_LEVELS, TF_SR, TF_L3, SL_FALLBACK_PERCENT, MIN_RR_RATIO
 from models import Candle, DrawStructure
 
 
@@ -175,10 +175,13 @@ class StructureEngine:
 
     @staticmethod
     def find_candidate(candles_signal_tf: list[Candle], structures: list[DrawStructure], now_ts: float):
+        """Sinyal bul - TP geniş (2-3. seviye), SL dar (en yakın seviye arkası)."""
         if len(candles_signal_tf) < 2:
             return None
         last = candles_signal_tf[-1]
         levels = [(s, s.projected_price(now_ts)) for s in structures]
+        # Geçersiz seviyeleri filtrele
+        levels = [(s, p) for s, p in levels if p > 0]
 
         buy_candidates = [(s, p) for s, p in levels if last.low <= p <= last.close]
         sell_candidates = [(s, p) for s, p in levels if last.close <= p <= last.high]
@@ -186,24 +189,102 @@ class StructureEngine:
         def nearest(cands):
             return min(cands, key=lambda sp: abs(sp[1] - last.close))
 
-        def next_above(price):
-            above = [p for _, p in levels if p > price]
-            return min(above) if above else price * 1.05
+        def levels_above(price, count=3):
+            """Fiyatın üstündeki seviyeleri sıralı getir."""
+            above = sorted(set(p for _, p in levels if p > price * 1.001))  # %0.1 üstü
+            return above[:count]
 
-        def next_below(price):
-            below = [p for _, p in levels if p < price]
-            return max(below) if below else price * 0.95
+        def levels_below(price, count=3):
+            """Fiyatın altındaki seviyeleri sıralı getir."""
+            below = sorted(set(p for _, p in levels if p < price * 0.999), reverse=True)  # %0.1 altı
+            return below[:count]
 
         if buy_candidates:
             s, lvl = nearest(buy_candidates)
-            tp = next_above(last.close)
-            sl = lvl * (1 - SL_PERCENT / 100)
-            return {"direction": "BUY", "level_code": s.level_code, "entry": last.close, "tp": tp, "sl": sl, "level": lvl}
+            entry = last.close
+
+            # TP: 2. veya 3. üst seviye (geniş hedef)
+            above = levels_above(entry)
+            if len(above) >= 2:
+                tp = above[1]  # 2. seviye = daha geniş hedef
+                tp_long = above[2] if len(above) >= 3 else above[1] * 1.02
+            elif len(above) >= 1:
+                tp = above[0]
+                tp_long = above[0] * 1.03
+            else:
+                tp = entry * 1.03
+                tp_long = entry * 1.05
+
+            # SL: Giriş seviyesinin hemen altındaki ilk seviye (dar stop)
+            below = levels_below(lvl)
+            if below:
+                sl = below[0] * 0.998  # Seviyenin %0.2 altı
+            else:
+                sl = entry * (1 - SL_FALLBACK_PERCENT / 100)
+
+            # Risk/Reward kontrolü - minimum 1:2 olmalı
+            risk = entry - sl
+            reward = tp - entry
+            if risk > 0 and reward / risk < MIN_RR_RATIO:
+                # TP'yi daha uzağa taşı
+                if len(above) >= 2:
+                    tp = above[1]
+                elif len(above) >= 1:
+                    tp = above[0] * 1.01
+                # Hala yetersizse SL'i daralt
+                reward = tp - entry
+                if risk > 0 and reward / risk < MIN_RR_RATIO:
+                    sl = entry - (reward / MIN_RR_RATIO)
+
+            rr = round(reward / risk, 2) if risk > 0 else 0
+
+            return {
+                "direction": "BUY", "level_code": s.level_code,
+                "entry": entry, "tp": tp, "sl": sl,
+                "tp_long": tp_long, "level": lvl, "rr_ratio": rr
+            }
 
         if sell_candidates:
             s, lvl = nearest(sell_candidates)
-            tp = next_below(last.close)
-            sl = lvl * (1 + SL_PERCENT / 100)
-            return {"direction": "SELL", "level_code": s.level_code, "entry": last.close, "tp": tp, "sl": sl, "level": lvl}
+            entry = last.close
+
+            # TP: 2. veya 3. alt seviye (geniş hedef)
+            below = levels_below(entry)
+            if len(below) >= 2:
+                tp = below[1]  # 2. seviye = daha geniş hedef
+                tp_long = below[2] if len(below) >= 3 else below[1] * 0.98
+            elif len(below) >= 1:
+                tp = below[0]
+                tp_long = below[0] * 0.97
+            else:
+                tp = entry * 0.97
+                tp_long = entry * 0.95
+
+            # SL: Giriş seviyesinin hemen üstündeki ilk seviye (dar stop)
+            above = levels_above(lvl)
+            if above:
+                sl = above[0] * 1.002  # Seviyenin %0.2 üstü
+            else:
+                sl = entry * (1 + SL_FALLBACK_PERCENT / 100)
+
+            # Risk/Reward kontrolü
+            risk = sl - entry
+            reward = entry - tp
+            if risk > 0 and reward / risk < MIN_RR_RATIO:
+                if len(below) >= 2:
+                    tp = below[1]
+                elif len(below) >= 1:
+                    tp = below[0] * 0.99
+                reward = entry - tp
+                if risk > 0 and reward / risk < MIN_RR_RATIO:
+                    sl = entry + (reward / MIN_RR_RATIO)
+
+            rr = round(reward / risk, 2) if risk > 0 else 0
+
+            return {
+                "direction": "SELL", "level_code": s.level_code,
+                "entry": entry, "tp": tp, "sl": sl,
+                "tp_long": tp_long, "level": lvl, "rr_ratio": rr
+            }
 
         return None
