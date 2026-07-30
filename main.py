@@ -113,6 +113,7 @@ def handle_start(chat_id: int):
 /istatistik - Win rate, kar/zarar istatistikleri
 /alarm [parite] [fiyat] - Fiyat alarmı kur
 /alarmlar - Aktif alarmları göster
+/longshort_oran [parite] - Long/Short oranı
 
 🔬 TEST:
 /backtest [parite] [mod] - Geçmiş veride test
@@ -396,6 +397,77 @@ def handle_rapor(chat_id: int):
     send_report([chat_id], ai)
 
 
+def handle_longshort(chat_id: int, args: str):
+    """Long/Short oranı - Depth + Funding Rate bazlı."""
+    if not args.strip():
+        send_message(chat_id, "❌ Kullanım: /longshort_oran [parite]\nÖrnek: /longshort_oran btcusdt")
+        return
+
+    symbol = search_symbol(args.strip())
+    send_typing(chat_id)
+
+    try:
+        # Depth verisi - Bid/Ask hacim oranı
+        resp = httpx.get(f"{config.MEXC_BASE}/depth/{symbol}?limit=20", timeout=5)
+        depth = resp.json()
+        bids = depth.get("data", {}).get("bids", [])
+        asks = depth.get("data", {}).get("asks", [])
+
+        bid_vol = sum(float(b[1]) for b in bids[:10])
+        ask_vol = sum(float(a[1]) for a in asks[:10])
+        total_vol = bid_vol + ask_vol
+
+        if total_vol == 0:
+            send_message(chat_id, f"❌ {symbol} için veri alınamadı.")
+            return
+
+        long_pct = bid_vol / total_vol * 100
+        short_pct = ask_vol / total_vol * 100
+        ls_ratio = bid_vol / ask_vol if ask_vol > 0 else 0
+
+        # Funding Rate
+        resp2 = httpx.get(f"{config.MEXC_BASE}/funding_rate/{symbol}", timeout=5)
+        funding_data = resp2.json()
+        funding_rate = float(funding_data.get("data", {}).get("fundingRate", 0))
+        funding_pct = funding_rate * 100
+
+        # Ticker - Open Interest
+        resp3 = httpx.get(f"{config.MEXC_BASE}/ticker?symbol={symbol}", timeout=5)
+        ticker = resp3.json()
+        hold_vol = ticker.get("data", {}).get("holdVol", 0)
+
+        # Yorum
+        if ls_ratio > 1.2:
+            sentiment = "🟢 LONG baskın - Alıcılar güçlü"
+        elif ls_ratio < 0.8:
+            sentiment = "🔴 SHORT baskın - Satıcılar güçlü"
+        else:
+            sentiment = "⚪ Dengeli - Net yön yok"
+
+        if funding_rate > 0.0005:
+            funding_note = "⚠️ Yüksek pozitif funding - Long kalabalık"
+        elif funding_rate < -0.0005:
+            funding_note = "⚠️ Negatif funding - Short kalabalık"
+        else:
+            funding_note = "✅ Normal funding"
+
+        text = (
+            f"📊 {symbol} LONG/SHORT ORANI\n"
+            f"{'='*30}\n\n"
+            f"📈 Long (Alıcı): %{long_pct:.1f}\n"
+            f"📉 Short (Satıcı): %{short_pct:.1f}\n"
+            f"⚖️ L/S Oranı: {ls_ratio:.2f}\n\n"
+            f"💰 Funding Rate: %{funding_pct:.4f}\n"
+            f"📦 Open Interest: {int(hold_vol):,}\n\n"
+            f"🎯 Değerlendirme: {sentiment}\n"
+            f"{funding_note}"
+        )
+        send_message(chat_id, text)
+
+    except Exception as e:
+        send_message(chat_id, f"❌ Long/Short oranı alınamadı: {e}")
+
+
 def handle_hata_tara(chat_id: int):
     issues = []
     ok_items = []
@@ -516,6 +588,8 @@ def handle_update(update: dict):
         handle_alarmlar(chat_id)
     elif text.startswith("/backtest"):
         handle_backtest(chat_id, text[9:].strip())
+    elif text.startswith("/longshort_oran"):
+        handle_longshort(chat_id, text[15:].strip())
     elif text == "/rapor":
         handle_rapor(chat_id)
     elif text == "/hata_tara":
@@ -590,6 +664,64 @@ def report_scheduler():
             time.sleep(60)
 
 
+# ============ OTOMATİK BACKTEST ============
+
+# Backtest meşguliyet kontrolü
+_backtest_busy = False
+_user_command_pending = False
+
+AUTO_BACKTEST_SYMBOLS = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT"]
+
+
+def auto_backtest_scheduler():
+    """Günde 7 kez otomatik backtest - meşgul değilken."""
+    global _backtest_busy
+    import random
+
+    # Günde 7 kez = yaklaşık her 3.5 saatte bir
+    interval = 3.5 * 3600  # 3.5 saat
+    last_run = 0
+
+    while True:
+        try:
+            now = time.time()
+            if now - last_run < interval:
+                time.sleep(60)
+                continue
+
+            # Kullanıcı komutu bekliyor mu?
+            if _user_command_pending:
+                time.sleep(10)
+                continue
+
+            _backtest_busy = True
+            symbol = random.choice(AUTO_BACKTEST_SYMBOLS)
+            mode = random.choice(["scalp", "swing"])
+
+            logger.info(f"Otomatik backtest: {symbol} ({mode})")
+            result = run_backtest(symbol, mode, lookback_candles=150)
+
+            # Sonucu Supabase'e kaydet
+            if result.get("total_signals", 0) > 0:
+                try:
+                    db.save_ai_note(
+                        "auto_backtest",
+                        f"{symbol} {mode}: WR={result['win_rate']}% Net={result.get('net_pnl',0)}% ({result['total_signals']} sinyal)",
+                        symbol,
+                        {"win_rate": result["win_rate"], "net_pnl": result.get("net_pnl", 0)}
+                    )
+                except:
+                    pass
+
+            last_run = time.time()
+            _backtest_busy = False
+
+        except Exception as e:
+            logger.error(f"Otomatik backtest hatası: {e}")
+            _backtest_busy = False
+        time.sleep(60)
+
+
 # ============ TRAILING STOP ============
 
 def trailing_stop_loop():
@@ -657,6 +789,7 @@ if __name__ == "__main__":
     threading.Thread(target=polling_loop, daemon=True).start()
     threading.Thread(target=report_scheduler, daemon=True).start()
     threading.Thread(target=trailing_stop_loop, daemon=True).start()
+    threading.Thread(target=auto_backtest_scheduler, daemon=True).start()
     logger.info("Tüm sistemler başlatıldı.")
 
     # Flask ana thread'de (Render port binding)
