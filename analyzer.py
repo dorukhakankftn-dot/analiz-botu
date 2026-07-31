@@ -175,8 +175,10 @@ def run_analysis(symbol: str, mode: str = "analiz") -> dict:
 Yön: {'📈 LONG' if candidate['direction'] == 'BUY' else '📉 SHORT'}
 Seviye: {candidate['level_code']}
 Giriş: {candidate['entry']:.6g}
-Hedef: {candidate['tp']:.6g}
-Stop: {candidate['sl']:.6g}
+TP1: {candidate['tp']:.6g}
+TP2: {candidate.get('tp_long', 0):.6g}
+SL: {candidate['sl']:.6g}
+R/R: 1:{candidate.get('rr_ratio', 0)}
 """
 
     return {"text": text.strip(), "signal": candidate}
