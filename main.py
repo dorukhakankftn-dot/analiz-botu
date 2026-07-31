@@ -545,7 +545,56 @@ def handle_stop_chat(chat_id: int):
 
 def handle_chat_message(chat_id: int, text: str):
     send_typing(chat_id)
-    chat_sessions[chat_id].append({"role": "user", "content": text})
+
+    # Kullanıcı analiz istiyorsa gerçek veri çek
+    analysis_keywords = ["analiz", "bak", "ne yapmalı", "giriş", "sinyal", "nereye gider", "yön"]
+    text_lower = text.lower().replace("ı", "i").replace("ş", "s")
+
+    # Parite adı tespit et
+    import re
+    symbol_match = re.search(r'([a-zA-Z]{2,10})(?:usdt)?', text_lower)
+    has_analysis_intent = any(kw in text_lower for kw in analysis_keywords)
+
+    extra_context = ""
+    if has_analysis_intent and symbol_match:
+        potential_symbol = symbol_match.group(1).upper() + "_USDT"
+        if validate_symbol(potential_symbol):
+            try:
+                # Hızlı veri çek (API'yi yormadan sadece 1h ve 4h)
+                from mexc_api import fetch_klines as _fetch
+                candles_1h = _fetch(potential_symbol, "1h", limit=20)
+                candles_4h = _fetch(potential_symbol, "4h", limit=20)
+                if candles_1h:
+                    last = candles_1h[-1]
+                    greens_1h = sum(1 for c in candles_1h[-5:] if c.is_green)
+                    reds_1h = sum(1 for c in candles_1h[-5:] if c.is_red)
+                    extra_context = f"\n\n[CANLI VERİ - {potential_symbol}]\n"
+                    extra_context += f"1H: O:{last.open:.6g} H:{last.high:.6g} L:{last.low:.6g} C:{last.close:.6g} | Son 5: {greens_1h}Y/{reds_1h}K\n"
+                    if candles_4h:
+                        last4 = candles_4h[-1]
+                        greens_4h = sum(1 for c in candles_4h[-5:] if c.is_green)
+                        reds_4h = sum(1 for c in candles_4h[-5:] if c.is_red)
+                        extra_context += f"4H: O:{last4.open:.6g} H:{last4.high:.6g} L:{last4.low:.6g} C:{last4.close:.6g} | Son 5: {greens_4h}Y/{reds_4h}K\n"
+
+                    # Seviyeleri hesapla
+                    _engine = StructureEngine()
+                    _structures = _engine.build_all({"1h": candles_1h, "4h": candles_4h or []}, is_new_coin=False)
+                    nearby = []
+                    import time as _time
+                    _now = _time.time()
+                    for s in _structures:
+                        p = s.projected_price(_now)
+                        if p > 0:
+                            dist = abs(p - last.close) / last.close * 100
+                            if dist <= 3:
+                                nearby.append(f"{s.level_code}[{s.timeframe}]={p:.6g}")
+                    if nearby:
+                        extra_context += f"Yakın seviyeler: {', '.join(nearby[:8])}\n"
+            except:
+                pass
+
+    user_content = text + extra_context
+    chat_sessions[chat_id].append({"role": "user", "content": user_content})
     if len(chat_sessions[chat_id]) > 20:
         chat_sessions[chat_id] = chat_sessions[chat_id][-20:]
     response = ai.protrader_chat(chat_sessions[chat_id])
